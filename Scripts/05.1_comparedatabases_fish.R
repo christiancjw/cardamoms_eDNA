@@ -1,144 +1,105 @@
-# =============================================================================
+# ----------------------------------------------------------------
 # 02_compare_databases.R
-#
-# Compares OTU recovery and taxonomic assignment between the MIDORI-only
-# and combined (MIDORI + local barcodes) database BLAST runs.
-#
-# INPUTS:  Data/Clean/fish_midori.csv and fish_combined.csv
-# OUTPUTS: Data/Clean/db_comparison_otus.csv
-#          Data/Clean/db_comparison_summary.csv
-#          Data/Clean/db_species_gained.csv
-# =============================================================================
+# ----------------------------------------------------------------
 
-# ----------------------------------------
-# Setup
+# Setup ----------------------------------------
 library(dplyr)
 library(readr)
-library(tidyr)
-
-input_dir  <- "Data/Clean/"
-output_dir <- "Data/Clean/"
+library(ggplot2)
 
 
-# 1: Load fish tables ----------------------------------------
-mid  <- read_csv(file.path(input_dir, "fish_midori.csv"),   show_col_types = FALSE)
-comb <- read_csv(file.path(input_dir, "fish_combined.csv"), show_col_types = FALSE)
+# 1: Load ----------------------------------------
+mid  <- read_csv("Data/Clean/fish_midori.csv",  show_col_types = FALSE)
+comb <- read_csv("Data/Clean/fish_combined.csv", show_col_types = FALSE)
 
-nrow(mid)   # MIDORI fish OTUs
-nrow(comb)  # Combined fish OTUs
+nrow(mid)
+nrow(comb)
 
 
-# 2: Add resolution level to each table ----------------------------------------
-# What is the finest taxonomic rank that was assigned for each OTU?
-
+# 2: Add resolution ----------------------------------------
 add_resolution <- function(df) {
-  df %>%
-    mutate(resolution = case_when(
-      !is.na(Species) & !Species %in% c("NoMatch", "Missing-Accession", "") ~ "Species",
-      !is.na(Genus)   & !Genus   %in% c("NoMatch", "Missing-Accession", "") ~ "Genus",
-      !is.na(Family)  & !Family  %in% c("NoMatch", "Missing-Accession", "") ~ "Family",
-      !is.na(Order)   & !Order   %in% c("NoMatch", "Missing-Accession", "") ~ "Order",
-      TRUE ~ "Unresolved"
-    ))
+  df %>% mutate(resolution = case_when(
+    !is.na(Species) & !Species %in% c("NoMatch","Missing-Accession","") ~ "Species",
+    !is.na(Genus)   & !Genus   %in% c("NoMatch","Missing-Accession","") ~ "Genus",
+    !is.na(Family)  & !Family  %in% c("NoMatch","Missing-Accession","") ~ "Family",
+    !is.na(Order)   & !Order   %in% c("NoMatch","Missing-Accession","") ~ "Order",
+    TRUE ~ "Unresolved"
+  ))
 }
 
 mid  <- add_resolution(mid)
 comb <- add_resolution(comb)
 
-# Check resolution breakdown for each database
 mid  %>% dplyr::count(resolution, sort = TRUE)
 comb %>% dplyr::count(resolution, sort = TRUE)
 
 
-# 3: OTU-level comparison ----------------------------------------
-# Join both tables on OTU_ID to compare assignment per OTU
+# 3: Fix species names in combined ----------------------------------------
 
-otu_compare <- full_join(
-  mid  %>% select(OTU_ID, Species_mid  = Species,  Genus_mid  = Genus,
-                  Family_mid  = Family,  Similarity_mid  = Similarity,
-                  resolution_mid  = resolution),
-  comb %>% select(OTU_ID, Species_comb = Species,  Genus_comb = Genus,
-                  Family_comb = Family,  Similarity_comb = Similarity,
-                  resolution_comb = resolution),
-  by = "OTU_ID"
-)
+comb <- comb %>%
+  mutate(Species = case_when(
+    Species == "Nemacheilus masyai/sp" ~ "Nemacheilus masyai",
+    Species == "Clarias sp"            ~ "Clarias cf nieuhofii",
+    TRUE                               ~ Species
+  ))
 
-# Classify what changed between databases for each OTU
-resolution_levels <- c("Unresolved", "Order", "Family", "Genus", "Species")
+# Check species names of these
+comb %>% filter(grepl("Nemacheilus|Clarias|Schistura", Species)) %>% dplyr::count(Species)
 
-otu_compare <- otu_compare %>%
-  mutate(
-    rank_mid  = match(resolution_mid,  resolution_levels),
-    rank_comb = match(resolution_comb, resolution_levels),
-    change = case_when(
-      is.na(rank_mid)  & !is.na(rank_comb) ~ "Gained by combined",
-      !is.na(rank_mid) &  is.na(rank_comb) ~ "Lost in combined",
-      rank_comb > rank_mid                  ~ "Improved",
-      rank_comb == rank_mid                 ~ "Same",
-      rank_comb < rank_mid                  ~ "Degraded",
-      TRUE                                  ~ "Same"
-    )
+
+# 4: Join and classify each OTU ----------------------------------------
+otu_compare <- mid %>%
+  select(OTU_ID, Species_mid = Species, Similarity_mid = Similarity, resolution_mid = resolution) %>%
+  full_join(
+    comb %>% select(OTU_ID, Species_comb = Species, Similarity_comb = Similarity, resolution_comb = resolution),
+    by = "OTU_ID"
   )
 
-# Summary of changes
-otu_compare %>% dplyr::count(change, sort = TRUE)
+# Type 1 — Species reassigned (wrong taxon corrected)
+type1_species <- c(
+  "Channa limbata",
+  "Rasbora elegans/sumatrana",
+  "Glyptothorax ventrolineatus",
+  "Clarias macrocephalus",
+  "Osteochilus hasseltii",
+  "Systomus orphoides",
+  "Schistura callichromus/fasciolata"
+)
+
+# Type 2 — Same species, better similarity via local voucher
+type2_species <- c(
+  "Pseudomystus siamensis",
+  "Mystacoleucus marginatus",
+  "Homaloptera confuzona",
+  "Parambassis siamensis"
+)
+
+otu_compare <- otu_compare %>%
+  mutate(improvement_type = case_when(
+    Species_mid %in% type1_species ~ "Type 1 — Reassigned",
+    Species_mid %in% type2_species & Similarity_comb > Similarity_mid ~ "Type 2 — Confidence",
+    TRUE ~ NA_character_
+  ))
+
+# Check
+otu_compare %>% filter(!is.na(improvement_type)) %>% dplyr::count(improvement_type)
+
+otu_compare %>%
+  filter(improvement_type == "Type 1 — Reassigned") %>%
+  select(Species_mid, Species_comb, Similarity_mid, Similarity_comb)
+
+otu_compare %>%
+  filter(improvement_type == "Type 2 — Confidence") %>%
+  select(Species_mid, Species_comb, Similarity_mid, Similarity_comb)
 
 
-# 4: Species-level comparison ----------------------------------------
-# Collapse OTUs to unique species for each database
+# 5: Summary table ----------------------------------------
+species_mid  <- mid  %>% filter(resolution == "Species") %>% distinct(Species)
+species_comb <- comb %>% filter(resolution == "Species") %>% distinct(Species)
 
-species_mid  <- mid  %>%
-  filter(!is.na(Species), !Species %in% c("NoMatch", "Missing-Accession", "")) %>%
-  distinct(Species, Genus, Family, Order) %>%
-  arrange(Family, Species)
-
-species_comb <- comb %>%
-  filter(!is.na(Species), !Species %in% c("NoMatch", "Missing-Accession", "")) %>%
-  distinct(Species, Genus, Family, Order) %>%
-  arrange(Family, Species)
-
-nrow(species_mid)   # unique species in MIDORI
-nrow(species_comb)  # unique species in combined
-
-# Species unique to each database
-species_gained <- species_comb %>% filter(!Species %in% species_mid$Species)
-species_lost   <- species_mid  %>% filter(!Species %in% species_comb$Species)
-
-cat("Species gained by combined database:\n")
-print(species_gained)
-
-cat("\nSpecies in MIDORI only (not in combined):\n")
-print(species_lost)
-
-
-# 5: Key finding — Rasbora correction ----------------------------------------
-# OTUs where combined changed the species assignment (not just improved rank)
-
-species_corrections <- otu_compare %>%
-  filter(
-    !is.na(Species_mid), !is.na(Species_comb),
-    !Species_mid %in% c("NoMatch", "Missing-Accession"),
-    !Species_comb %in% c("NoMatch", "Missing-Accession"),
-    Species_mid != Species_comb
-  ) %>%
-  select(OTU_ID, Species_mid, Species_comb, Similarity_mid, Similarity_comb)
-
-cat("\nOTUs where species assignment changed between databases:\n")
-print(species_corrections)
-
-
-# 6: Summary table for paper ----------------------------------------
-
-summary_table <- tibble(
-  Metric = c(
-    "Fish OTUs total",
-    "Resolved to species",
-    "Resolved to genus",
-    "Resolved to family",
-    "Unresolved",
-    "Unique species detected",
-    "Species-level rate (%)"
-  ),
+tibble(
+  Metric = c("Fish OTUs","Species-level","Genus-level","Family-level",
+             "Unresolved","Unique species","Species rate (%)"),
   MIDORI_only = c(
     nrow(mid),
     sum(mid$resolution == "Species"),
@@ -159,13 +120,66 @@ summary_table <- tibble(
   )
 )
 
-print(summary_table)
 
+# 6: Plot ----------------------------------------
+# Colours
+  res_colours <- c(
+    "Species"           = "#1A6BAD",   # dark blue
+    "Species (Type 1)"  = "#5AADD4",   # mid blue
+    "Species (Type 2)"  = "#A8D4EC",   # light blue
+    "Genus"             = "#66C2A5",   # teal  (Set2)
+    "Family"            = "#FC8D62",   # orange (Set2)
+    "Order"             = "#8DA0CB",   # lavender (Set2)
+    "Unresolved"        = "#D9D9D9"   
+)
 
-# 7: Write outputs ----------------------------------------
-write_csv(otu_compare,    file.path(output_dir, "db_comparison_otus.csv"))
-write_csv(summary_table,  file.path(output_dir, "db_comparison_summary.csv"))
-write_csv(species_gained, file.path(output_dir, "db_species_gained.csv"))
+res_levels <- c("Species","Species (Type 1)","Species (Type 2)",
+                "Genus","Family","Order","Unresolved")
 
-cat("Done. Outputs written to", output_dir, "\n")
-cat("Next step: run 03_visualise_comparison.R\n")
+n_type1   <- sum(otu_compare$improvement_type == "Type 1 — Reassigned",  na.rm = TRUE)
+n_type2   <- sum(otu_compare$improvement_type == "Type 2 — Confidence",   na.rm = TRUE)
+n_species <- sum(mid$resolution == "Species") - n_type1 - n_type2
+
+# MIDORI bar — species split into 3 segments
+midori_bar <- bind_rows(
+  data.frame(resolution = "Species",          n = n_species),
+  data.frame(resolution = "Species (Type 1)", n = n_type1),
+  data.frame(resolution = "Species (Type 2)", n = n_type2),
+  mid %>% dplyr::count(resolution) %>% filter(resolution != "Species")
+) %>% mutate(Database = "MIDORI only")
+
+# Combined bar — species as single block
+comb_bar <- comb %>%
+  dplyr::count(resolution) %>%
+  mutate(Database = "MIDORI + Local")
+
+plot_data <- bind_rows(midori_bar, comb_bar) %>%
+  mutate(
+    resolution = factor(resolution, levels = res_levels),
+    Database   = factor(Database, levels = c("MIDORI only", "MIDORI + Local"))
+  )
+
+fig_resolution <- ggplot(plot_data, aes(x = Database, y = n, fill = resolution)) +
+  geom_col(width = 0.5) +
+  geom_text(aes(label = ifelse(n > 1, n, "")),
+            position = position_stack(vjust = 0.5),
+            size = 3.5, colour = "white", fontface = "bold") +
+  scale_fill_manual(values = res_colours, name = NULL,
+                    labels = c(
+                      "Species"          = "Species",
+                      "Species (Type 1)" = "Sp. Incorrect Match",
+                      "Species (Type 2)" = "Sp. Confidence Increase",
+                      "Genus"            = "Genus",
+                      "Family"           = "Family",
+                      "Order"            = "Order",
+                      "Unresolved"       = "Unresolved"
+                    )) +
+  labs(x = NULL, y = "Number of OTUs") +
+  theme_classic(base_size = 12) +
+  theme(
+    legend.position  = "right",
+    legend.direction = "vertical"
+  )
+
+fig_resolution
+
