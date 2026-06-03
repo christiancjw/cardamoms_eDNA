@@ -65,7 +65,7 @@ otu_pa <- otu_pa %>%
 
 sample_event <- meta %>% select(Sample, Event, Site, Strahler, QBR,
                                 Season, Deployment, QBR_Class, Strahler_Class,
-                                Month, Year, pH, `us/cm`, ppm, Long, Lat, Code)
+                                Month, Year, pH, `us/cm`, ppm, Long, Lat, Code, Branch)
 
 # Convert to long form
 community_long <- otu_pa %>%
