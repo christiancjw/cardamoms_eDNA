@@ -16,6 +16,11 @@ library(iNEXT)
 library(sf)
 library(ggrepel)
 library(ggspatial)
+library(lme4)
+library(lmerTest)   # adds p-values via Satterthwaite
+
+install.packages("ggstar")
+library(ggstar)
 
 # Colour palettes ----------------------------------------
 strahler_f_colors <- c(
@@ -65,6 +70,8 @@ alpha_div %>% select(Event, Site, Strahler_f, Season, richness)
 
 
 # 3: Linear models ----------------------------------------
+
+
 
 # Richness ~ Strahler (continuous — tests linear gradient)
 lm_strahler <- lm(richness ~ Strahler, data = alpha_div)
@@ -160,6 +167,15 @@ stats_head <- sacc_stats(sacc_head, "Cardamom headwaters (1–3)")
 stats_low  <- sacc_stats(sacc_low,  "Lowland (4–5)")
 
 
+# SOme statistics for ya - average sp per sample / stdv
+per_sample <- function(sacc, label) {
+  cat(sprintf("%s: %.1f species per event (SD %.1f)\n",
+              label, sacc$richness[1], sacc$sd[1]))
+}
+
+per_sample(sacc_full, "Full basin (1–5)")
+per_sample(sacc_head, "Cardamom headwaters (1–3)")
+per_sample(sacc_low,  "Lowland (4–5)")
 # Build tidy data frame for plotting ----------------------------------------
 
 # iNEXT takes a list of incidence frequency data
@@ -263,6 +279,7 @@ fig_accumulation <- ggplot(sacc_df,
 
 fig_accumulation
 
+
 # Run iNEXT by number of samples (replicates, not events) ----------------------------------------
 # Uses the full replicate-level P/A matrix — each replicate is one sampling unit
 meta_raw <- read_csv("Data/Raw/riparia2024_metadata.csv",  show_col_types = FALSE)
@@ -364,6 +381,48 @@ fig_accumulation <- ggplot(sacc_df,
 
 fig_accumulation
 
+## SP Accu Stats -----
+# 7: Coleman species accumulation ----------------------------------------
+# Random-placement (Coleman) expectation of richness at a given sample size,
+# reported with the Coleman SD. Run for the whole basin and separately for
+# the headwater (1–3) and lowland (4–5) groups.
+
+coleman_mat <- function(min_s, max_s) {
+  samp <- meta_raw %>% filter(Strahler >= min_s, Strahler <= max_s) %>% pull(Sample)
+  samp <- samp[samp %in% colnames(otu_pa)]                  # keep samples present in matrix
+  mat  <- t(as.matrix(otu_pa[, samp, drop = FALSE]))        # otu_pa is species × sample → transpose
+  mat[, colSums(mat) > 0, drop = FALSE]                     # drop species absent from the subset
+}
+
+coleman_report <- function(mat, label, n_small = c(1, 3), ref_n = NULL) {
+  per_samp <- rowSums(mat > 0)
+  sac      <- specaccum(mat, method = "coleman")
+  
+  if (is.null(ref_n)) ref_n <- max(sac$sites)
+  if (ref_n > max(sac$sites)) {
+    warning(sprintf("ref_n (%d) exceeds samples available (%d); using endpoint",
+                    ref_n, max(sac$sites)))
+    ref_n <- max(sac$sites)
+  }
+  ref_rich <- sac$richness[which(sac$sites == ref_n)]
+  
+  cat(sprintf("\n%s  (%d samples, %d species)\n", label, nrow(mat), ncol(mat)))
+  cat(sprintf("  Observed per sample: %.2f species (±%.2f SD)\n",
+              mean(per_samp), sd(per_samp)))
+  for (n in n_small) {
+    i <- which(sac$sites == n) 
+    cat(sprintf("  Coleman n=%d: %.1f species (±%.1f SD) = %.0f%% of %d-sample richness\n",
+                n, sac$richness[i], sac$sd[i],
+                100 * sac$richness[i] / ref_rich, ref_n))
+  }
+  invisible(sac)
+}
+
+# ref_n = NULL uses each curve's endpoint; set a number (e.g. 50) for a fixed denominator
+coleman_report(coleman_mat(1, 5), "Full basin (1–5)")
+coleman_report(coleman_mat(1, 3), "Cardamom headwaters (1–3)")
+coleman_report(coleman_mat(4, 5), "Lowland (4–5)")
+
 
 # Richness Map ------------------------
 
@@ -439,11 +498,17 @@ sites_sf <- sites_sf %>%
 
 fig_map <- ggplot() +
   geom_sf(data = rivers, aes(colour = "Waterways"), linewidth = 0.4, alpha = 0.8,
-          key_glyph = "path") +   # forces legend key to show as a line 
-  scale_colour_manual(values = c("Waterways" = "black"), name = NULL) + # dummy line for legend
+          key_glyph = "path") +
+  scale_colour_manual(values = c("Waterways" = "black"), name = NULL) +
+  
+  # Points — shape = Strahler order, fill = richness (continuous colour scale)
   geom_sf(data   = sites_sf,
-          aes(fill = Strahler_f, size = mean_richness),
-          shape  = 21, colour = "black", stroke = 0.8, alpha = 0.95) +
+          aes(shape = Strahler_f, fill = mean_richness),
+          size   = 7,
+          colour = "black",
+          stroke = 0.8,
+          alpha  = 1) +
+  
   geom_sf_text(
     data = sites_sf,
     aes(label = paste0(Code, " (", round(mean_richness, 1), ")")),
@@ -453,12 +518,20 @@ fig_map <- ggplot() +
     nudge_x = sites_sf$nudge_x,
     nudge_y = sites_sf$nudge_y
   ) +
-  scale_fill_manual(values = strahler_f_colors, name = "Strahler order") +
-  scale_size_continuous(range = c(3, 10), name = "Mean species richness") +
+  
+  # Shapes need to be filled types (21-25) to show fill colour
+  scale_shape_manual(values = c("1st" = 24,   # triangle
+                                "2nd" = 21,   # circle
+                                "3rd" = 22,   # square
+                                "4th" = 23,   # diamond (pentagon not available as filled shape)
+                                "5th" = 25),  # inverted triangle (octagon not available)
+                     name = "Strahler order") +
+  scale_fill_viridis_c(name = "Mean species richness", option = "D") +
+  
   annotation_north_arrow(
     location    = "br",
-    pad_x    = unit(0.8, "cm"),   # distance from right edge
-    pad_y    = unit(1.8, "cm"),   # distance from bottom edge
+    pad_x       = unit(0.8, "cm"),
+    pad_y       = unit(1.8, "cm"),
     which_north = "true",
     rotation    = -300,
     style       = north_arrow_fancy_orienteering(
@@ -467,28 +540,26 @@ fig_map <- ggplot() +
     ),
     height = unit(1.5, "cm"), width = unit(1.5, "cm")
   ) +
+  
   theme_minimal(base_size = 11) +
-  # 2-column legend
   guides(
-    fill   = guide_legend(title = "Strahler order",    ncol = 1, order = 1,
-                          override.aes = list(size = 5)),   # bigger points in legend
-    size   = guide_legend(title = "Mean sp. richness", ncol = 1, order = 2),
+    shape  = guide_legend(title = "Strahler order", order = 1,
+                          override.aes = list(fill = "grey60", size = 4)),
+    fill   = guide_colorbar(title = "Mean species richness", order = 2),
     colour = guide_legend(title = NULL, order = 3,
                           override.aes = list(
-                            linetype  = 1,          # force line not box
-                            linewidth = 0.8,
-                            shape     = NA,         # remove any point shape
-                            fill      = NA          # remove box fill
+                            linetype  = 1, linewidth = 0.8,
+                            shape = NA, fill = NA
                           ))
-  )+
+  ) +
   theme(
-    legend.box         = "horizontal",   # puts the three guides side by side
-    legend.position      = c(0.48, 0.02), 
-    legend.justification = c("left", "bottom"),
-    legend.title         = element_text(size = 10, face = "bold"),
-    legend.text          = element_text(size = 10),
-    legend.key.size      = unit(0.4, "cm"),
-    panel.background     = element_rect(fill = "white", colour = NA)
+    legend.box            = "horizontal",
+    legend.position       = c(0.3, 0.02),
+    legend.justification  = c("left", "bottom"),
+    legend.title          = element_text(size = 10, face = "bold"),
+    legend.text           = element_text(size = 10),
+    legend.key.size       = unit(0.4, "cm"),
+    panel.background      = element_rect(fill = "white", colour = NA)
   )
 
 fig_map

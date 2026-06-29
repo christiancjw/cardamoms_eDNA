@@ -14,7 +14,7 @@
 #   - Contaminant species are removed after fish filtering
 # =============================================================================
 
-# ----------------------------------------
+# ----------------------------------------z
 # Setup
 library(readxl)
 library(dplyr)
@@ -41,8 +41,7 @@ nc_samples <- c()
 # FLAG — introduced/non-native (kept in dataset, noted in paper):
 #   Oreochromis niloticus      — African cichlid, aquaculture escapee
 #   Hypophthalmichthys nobilis — Chinese bighead carp, stocked fisheries
-#
-# Add any additional confirmed misidentifications to remove_species below.
+
 
 remove_species <- c(
   "Trinectes inscriptus",
@@ -66,7 +65,7 @@ nrow(tax_comb)  # should be 229
 nrow(reads)     # should be 229
 
 
-# 3: Standardise the ID column name ----------------------------------------
+ # 3: Standardise the ID column name ----------------------------------------
 # Taxonomy uses "unique ID", read table uses "hash" — rename both to OTU_ID
 tax_mid  <- tax_mid  %>% rename(OTU_ID = `unique ID`)
 tax_comb <- tax_comb %>% rename(OTU_ID = `unique ID`)
