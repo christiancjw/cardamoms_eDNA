@@ -165,15 +165,12 @@ write.csv(df, "Data/Clean/fish_species_table_complete.csv", row.names = FALSE)
 #   Detected species: sized by proportion of samples detected
 #   Voucher species (not eDNA-recovered): X marker where voucher collected
 # ================================================================
-# ================================================================
-# STAGE 4 — Detection dot-plot
-#   Detected species: sized by proportion of samples detected
-#   Voucher species (not eDNA-recovered): X where voucher collected
-# ================================================================
+
 
 # --- 4a: Read the complete table for names + status ---
 sp <- read_csv("Data/Clean/fish_species_table_complete.csv", show_col_types = FALSE) %>%
   mutate(Reference = str_replace_all(Reference, "[()]", ""))
+
 
 site_cols  <- c("Ta_Chey", "Ta_Say", "Dam5", "Tang_Rang", "Pursat")
 site_order <- c("Ta Chey", "Ta Say", "Dam 5", "Tang Rang", "Pursat")
@@ -221,32 +218,46 @@ voucher_long <- sp %>%
   select(Order, Family, Corrsp, sp_label, Site)
 
 
-# --- 4d: One canonical ordering for ALL species (detected + voucher) ---
-# Combine BEFORE arranging so each family forms a single contiguous block
+# --- 4d: One canonical ordering — voucher species interleaved by taxonomy ---
+# 4d
 all_species <- bind_rows(
   prop_table   %>% distinct(Order, Family, Corrsp, sp_label),
   voucher_long %>% distinct(Order, Family, Corrsp, sp_label)
 ) %>%
-  distinct(sp_label, .keep_all = TRUE) %>%
+  distinct(Corrsp, .keep_all = TRUE) %>%    # dedupe on Corrsp, not sp_label
   arrange(Order, Family, Corrsp)
 
-# Axis order: reverse so first species sits at the top of the plot
 species_levels <- rev(all_species$sp_label)
+
+# VERIFY — must all be TRUE
+all(voucher_long$sp_label %in% species_levels)
+all(prop_table$sp_label   %in% species_levels)
+
+# Confirm voucher species are interleaved, not clustered at one end
+all_species %>%
+  mutate(is_voucher = sp_label %in% voucher_long$sp_label,
+         pos = row_number()) %>%
+  filter(is_voucher) %>%
+  select(pos, Order, Family, Corrsp)
 
 
 # --- 4e: Apply the shared factor axis ---
 prop_table <- prop_table %>%
-  mutate(sp_label = factor(sp_label, levels = species_levels),
-         Site     = factor(Site, levels = site_order),
+  mutate(sp_label = factor(as.character(sp_label), levels = species_levels),
+         Site     = factor(as.character(Site), levels = site_order),
          marker   = "Detected")
 
 voucher_long <- voucher_long %>%
-  mutate(sp_label   = factor(sp_label, levels = species_levels),
-         Site       = factor(Site, levels = site_order),
+  mutate(sp_label   = factor(as.character(sp_label), levels = species_levels),
+         Site       = factor(as.character(Site), levels = site_order),
          proportion = NA_real_,
          marker     = "Voucher collected, not eDNA-detected")
 
 plot_data <- bind_rows(prop_table, voucher_long)
+
+# Must both be 0 — if not, the factor conversion failed
+sum(is.na(plot_data$sp_label))
+sum(is.na(plot_data$Site))
 
 
 # --- 4f: Family divider lines and labels (numeric positions, one source) ---
@@ -273,6 +284,13 @@ family_lookup %>%
   filter(!contiguous)
 
 
+# Red dots — species with a voucher specimen
+voucher_dots <- sp %>%
+  filter(!is.na(Voucher) & Voucher) %>%
+  distinct(sp_label) %>%
+  mutate(y_num = match(sp_label, species_levels)) %>%
+  filter(!is.na(y_num))
+
 # --- 4g: Plot ---
 site_colours <- c(
   "Ta Chey"   = "#4FA873",
@@ -282,48 +300,219 @@ site_colours <- c(
   "Pursat"    = "#C0392B"
 )
 
-fig_occurrence <- ggplot(plot_data, aes(x = Site, y = sp_label)) +
-  # Family divider lines — numeric intercepts on the discrete y-axis
+plot_data <- plot_data %>%
+  mutate(y_num = as.integer(sp_label))
+
+fig_occurrence <- ggplot() +
+  
+  # Family divider lines
   geom_hline(yintercept = family_breaks, linetype = "dotted",
              colour = "grey60", linewidth = 0.3) +
+  
+  # Red dot — voucher collected / barcoded
+  geom_point(data = voucher_dots,
+             aes(y = y_num, colour = "Voucher barcoded"),
+             x = -3.7,
+             inherit.aes = FALSE,
+             size = 1.1) +
+  
   # Detected species bubbles
   geom_point(data = plot_data %>% filter(marker == "Detected"),
-             aes(size = proportion, fill = Site),
+             aes(x = Site, y = y_num, size = proportion, fill = Site),
              shape = 21, colour = "black", stroke = 0.3) +
+  
   # Voucher X marks
   geom_point(data = plot_data %>% filter(marker != "Detected"),
-             aes(shape = marker),
+             aes(x = Site, y = y_num, shape = marker),
              size = 1.8, colour = "grey20", stroke = 0.5) +
-  # Family labels — numeric y_pos matches the numeric hline breaks
+  
+  # Family labels
   geom_text(data = family_labels,
             aes(y = y_pos, label = Family),
-            x = 0.15, inherit.aes = FALSE,
+            x = -0.2, inherit.aes = FALSE,
             hjust = 0, vjust = 0.5,
             size = 2.2, fontface = "bold", colour = "grey30") +
+  
+  # Species names on the numeric axis
+  scale_y_continuous(
+    breaks = seq_along(species_levels),
+    labels = species_levels,
+    expand = expansion(add = 0.6)
+  ) +
   scale_size(range = c(0.2, 2), name = "Proportion of samples detected") +
   scale_fill_manual(values = site_colours, guide = "none") +
   scale_shape_manual(values = c("Voucher collected, not eDNA-detected" = 4),
                      name = NULL) +
-  scale_x_discrete(expand = expansion(add = c(0.9, 0.4))) +
+  scale_colour_manual(values = c("Voucher barcoded" = "#C0392B"),
+                      name = NULL) +
+  scale_x_discrete(expand = expansion(add = c(1.3, 0.7))) +
   coord_cartesian(clip = "off") +
-  labs(x = NULL, y = "Species") +
+  labs(x = "Site", y = "Species") +
+  guides(
+    size   = guide_legend(order = 1, nrow = 1),
+    shape  = guide_legend(order = 2),
+    colour = guide_legend(order = 3)
+  ) +
   theme_classic(base_size = 9) +
   theme(
     axis.text.y          = element_text(size = 7, face = "italic"),
     axis.text.x          = element_text(angle = 45, hjust = 1),
     axis.title.y         = element_text(size = 9),
-    axis.title.x         = element_text(size = 9),
     legend.title         = element_text(size = 8),
     legend.text          = element_text(size = 8),
     legend.key.size      = unit(0.4, "cm"),
     legend.position      = "bottom",
-    legend.box           = "horizontal",
+    legend.box           = "vertical",
     legend.justification = "left",
     legend.box.just      = "left",
-    legend.box.margin    = margin(l = -85)
+    legend.box.margin    = margin(l = -85),
+    legend.spacing.y     = unit(0.02, "cm"),    # gap between the three legend blocks
+    legend.margin        = margin(t = 0, b = 0, l = 0, r = 0),
+    legend.key.spacing.y = unit(0, "cm")        # gap between keys within a legend
   )
-
 fig_occurrence
 
 ggsave(fig_occurrence, file="a4_output.pdf", width = 190, height = 297, units = "mm")
 
+
+all_species %>% 
+  mutate(is_voucher = sp_label %in% voucher_long$sp_label) %>%
+  select(Order, Family, Corrsp, is_voucher) %>%
+  print(n = 100)
+
+
+## Unresolved OTU List:
+# ================================================================
+# Unassigned OTU detection plot
+#   All OTUs NOT resolved to species level.
+#   Each OTU kept separate (numbered) — no merging.
+#   Sorted by Order > Family > Genus, with unresolved at the bottom.
+# ================================================================
+
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+library(stringr)
+
+
+# --- 1: Read and filter to non-species OTUs --------------------
+otu <- read_csv("Data/Clean/fish_species_table.csv", show_col_types = FALSE) %>%
+  filter(resolution != "Species")
+
+site_cols  <- c("Ta_Chey", "Ta_Say", "Dam5", "Tang_Rang", "Pursat")
+site_order <- c("Ta Chey", "Ta Say", "Dam 5", "Tang Rang", "Pursat")
+
+site_rename <- c(Ta_Chey   = "Ta Chey",
+                 Ta_Say    = "Ta Say",
+                 Dam5      = "Dam 5",
+                 Tang_Rang = "Tang Rang",
+                 Pursat    = "Pursat")
+
+
+# --- 2: Build unique OTU labels --------------------------------
+# Label = most resolved taxon available + a number to keep each OTU distinct
+otu <- otu %>%
+  mutate(
+    taxon = case_when(
+      resolution == "Genus"  ~ paste0(Genus,  " sp."),
+      resolution == "Family" ~ paste0(Family, " sp."),
+      resolution == "Order"  ~ paste0(Order,  " sp."),
+      TRUE                   ~ "Unresolved"
+    ),
+    # sort keys — NA pushed to the bottom
+    ord_key = if_else(is.na(Order),  "zzz", Order),
+    fam_key = if_else(is.na(Family), "zzz", Family),
+    gen_key = if_else(is.na(Genus),  "zzz", Genus),
+    # unresolved OTUs sort last overall
+    res_key = if_else(resolution == "Unresolved", 2L, 1L)
+  ) %>%
+  arrange(res_key, ord_key, fam_key, gen_key) %>%
+  group_by(taxon) %>%
+  mutate(otu_label = if (n() > 1) paste0(taxon, " ", row_number()) else taxon) %>%
+  ungroup()
+
+otu %>% select(otu_label, Order, Family, Genus, resolution) %>% print(n = Inf)
+
+
+# --- 3: Long format for plotting -------------------------------
+otu_long <- otu %>%
+  select(otu_label, Order, Family, resolution, all_of(site_cols)) %>%
+  pivot_longer(all_of(site_cols), names_to = "Site", values_to = "mark") %>%
+  filter(mark == "X") %>%
+  mutate(Site = unname(site_rename[Site]))
+
+
+# --- 4: Axis ordering ------------------------------------------
+# Keep the arrange() order from step 2; reverse for bottom-up ggplot
+otu_levels <- rev(otu$otu_label)
+
+otu_long <- otu_long %>%
+  mutate(
+    y_num = match(otu_label, otu_levels),
+    Site  = factor(Site, levels = site_order)
+  )
+
+sum(is.na(otu_long$y_num))   # must be 0
+
+
+# --- 5: Family divider lines and labels ------------------------
+otu_lookup <- otu %>%
+  mutate(y_pos     = match(otu_label, otu_levels),
+         fam_label = if_else(is.na(Family), "Unresolved", Family)) %>%
+  arrange(y_pos)
+
+family_breaks <- otu_lookup %>%
+  mutate(change = fam_label != lag(fam_label)) %>%
+  filter(change) %>%
+  pull(y_pos) - 0.5
+
+family_labels <- otu_lookup %>%
+  group_by(fam_label) %>%
+  summarise(y_pos = max(y_pos), .groups = "drop")
+
+
+# --- 6: Plot ---------------------------------------------------
+site_colours <- c(
+  "Ta Chey"   = "#4FA873",
+  "Ta Say"    = "#5E9BD4",
+  "Dam 5"     = "#98319B",
+  "Tang Rang" = "#F2A35C",
+  "Pursat"    = "#C0392B"
+)
+
+fig_otu <- ggplot() +
+  
+  geom_hline(yintercept = family_breaks, linetype = "dotted",
+             colour = "grey60", linewidth = 0.3) +
+  
+  geom_point(data = otu_long,
+             aes(x = Site, y = y_num, fill = Site),
+             shape = 21, colour = "black", stroke = 0.3, size = 2) +
+  
+  geom_text(data = family_labels,
+            aes(y = y_pos, label = fam_label),
+            x = 0.15, inherit.aes = FALSE,
+            hjust = 0, vjust = 0.5,
+            size = 2.2, fontface = "bold", colour = "grey30") +
+  
+  scale_y_continuous(
+    breaks = seq_along(otu_levels),
+    labels = otu_levels,
+    expand = expansion(add = 0.6)
+  ) +
+  scale_fill_manual(values = site_colours, guide = "none") +
+  scale_x_discrete(expand = expansion(add = c(0.9, 0.4))) +
+  coord_cartesian(clip = "off") +
+  labs(x = "Site", y = "Unassigned OTU") +
+  theme_classic(base_size = 9) +
+  theme(
+    axis.text.y  = element_text(size = 7, face = "italic"),
+    axis.text.x  = element_text(angle = 45, hjust = 1),
+    axis.title.x = element_text(size = 9),
+    axis.title.y = element_text(size = 9)
+  )
+
+fig_otu
+
+ggsave("otu_unassigned.pdf", fig_otu, width = 170, height = 150, units = "mm")
